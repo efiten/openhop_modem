@@ -51,6 +51,7 @@
 #  include "tcp_server.h"
 #  include "ota_manager.h"
 #  include "ethernet_manager.h"
+#  include "dhcp_routes.h"
 #  include "runtime_stats.h"
 #  include "gps_manager.h"
 #  include "pmu_manager.h"
@@ -1781,6 +1782,9 @@ void setup() {
     // and skip Wi-Fi; if no link we tear EMAC back down (so the RMII
     // GPIOs are released) and fall back to Wi-Fi. Boards without
     // Ethernet (`ethernet.enabled = false`) skip straight to Wi-Fi.
+    // Initialize the DHCP option 121 module (event handler + route state)
+    // before either interface starts DHCP so the first lease is covered.
+    DhcpRoutes::begin();
     WifiManager::loadConfigOnly();
     const auto& netCfg = WifiManager::getConfig();
     bool useEthernet = false;
@@ -2029,7 +2033,12 @@ void loop() {
     if (BOARD.has_wifi) WifiManager::loop();
 #ifdef ARDUINO_ARCH_ESP32
     const uint32_t invalidSTA = WifiManager::consumeSTAInvalidation();
-    if (invalidSTA) TCPServer::invalidateInterface(IPAddress(invalidSTA));
+    if (invalidSTA) {
+        // DhcpRoutes::reset() is event-driven (disconnect/lost-IP). Doing it
+        // here can race with a reconnect: an old invalidation consumed after
+        // the new GOT_IP would erase the fresh route table.
+        TCPServer::invalidateInterface(IPAddress(invalidSTA));
+    }
 #endif
     if (tcpStarted) TCPServer::loop();
 #if defined(OPENHOP_ETHERNET_W5100S)

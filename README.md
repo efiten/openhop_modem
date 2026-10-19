@@ -234,6 +234,22 @@ remote access run a VPN whose tunnel address (WireGuard / Tailscale
 in 100.64/10 → Tailscale subnet route, or any `10/8` overlay) is
 inside the LAN range from the modem's point of view.
 
+### DHCP classless static routes (option 121)
+
+The ESP32/ESP-IDF lwIP client does not request or parse DHCP option 121
+(RFC 3442). On routed LANs where a VPN or overlay prefix is reachable
+through a different next hop than the default router, replies from the
+modem leave through the default gateway and router connection tracking
+drops them (asymmetric routing). `firmware/include/dhcp_routes.h` adds
+option 121 to the Parameter Request List, parses option 121 (and the
+Microsoft 249 alias) from the DHCP OFFER/ACK, and installs the learned
+next hop for matching destinations. A valid option replaces the runtime
+table; malformed or duplicate options keep the last good table, and
+link loss clears it. Learned entries are listed on `/stats`, in
+`/api/network` (`base_gateway`, `dhcp_routes_active`, `dhcp_routes`),
+and in the serial log (`[DHCP] option 121: ...`). The LAN-only source
+filter above is unchanged and still applies.
+
 T114 has no IP stack at all — the only paths in are USB-CDC and the
 secondary UART, and updates are either Adafruit DFU over USB or the
 in-app `OTA_*` commands carried over the same transport.

@@ -107,6 +107,9 @@ Example:
   "current_ip": "192.168.1.42",
   "subnet": "255.255.255.0",
   "gateway": "192.168.1.1",
+  "base_gateway": null,
+  "dhcp_routes_active": false,
+  "dhcp_routes": [],
   "dns1": "1.1.1.1",
   "dns2": "8.8.8.8",
   "tcp_port": 5055,
@@ -118,6 +121,32 @@ Example:
     "dns1": "1.1.1.1",
     "dns2": "8.8.8.8"
   }
+}
+```
+
+`gateway` is the live default gateway shown by the WebUI. `base_gateway`
+is the cached DHCP option-3 router, exposed separately because lwIP has
+one gateway per interface while option 121 can install several
+per-prefix next hops. It is `null` until a DHCP lease supplies it (and
+therefore also in static-address mode). `dhcp_routes_active` reports
+whether a valid option 121 table is installed, and `dhcp_routes` lists
+the entries as `{destination, prefix, gateway}` objects. A
+DHCP-advertised default route is included as
+`destination: "0.0.0.0"`, `prefix: 0`. The array is empty on static
+addresses and on networks without option 121. Example with two routed
+prefixes and a default route:
+
+```json
+{
+  "mode": "dhcp",
+  "gateway": "192.168.1.1",
+  "base_gateway": "192.168.1.1",
+  "dhcp_routes_active": true,
+  "dhcp_routes": [
+    { "destination": "10.20.0.0", "prefix": 16, "gateway": "192.168.1.10" },
+    { "destination": "172.20.0.0", "prefix": 16, "gateway": "192.168.1.10" },
+    { "destination": "0.0.0.0", "prefix": 0, "gateway": "192.168.1.1" }
+  ]
 }
 ```
 
