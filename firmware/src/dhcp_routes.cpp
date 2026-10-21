@@ -13,19 +13,19 @@
 //
 // Implementation notes
 // --------------------
-// The precompiled ESP-IDF lwIP allows three link-time hooks:
+// The precompiled ESP-IDF lwIP allows four link-time hooks:
 //   - dhcp_parse_extra_opts()  -> sees every option lwIP does not parse
 //   - dhcp_append_extra_opts() -> lets us add to the outgoing DHCP msg
 //   - ip4_route_src_hook()     -> called for off-link destinations
+//   - icmp_input()             -> echo replies bypass the route hook
 // We intercept them with GNU ld --wrap (see platformio.ini) instead of
 // defining the symbols directly, which would collide with the archive
 // members shipped by ESP-IDF.
 //
 // lwIP has one gateway per netif, not a routing table. The IPv4 route
-// hook is therefore used to point netif->gw at the learned next hop for
-// the duration of each off-link transmit. Every off-link packet goes
-// through the hook, so the correct next hop is installed before
-// etharp_output() resolves the gateway.
+// hook points netif->gw at the learned next hop before each off-link
+// transmit; etharp_output() then resolves that gateway. ICMP echo
+// replies bypass the hook, so icmp_input() is wrapped as well.
 // =============================================================
 #include "dhcp_routes.h"
 
@@ -39,6 +39,8 @@
 extern "C" {
 #include <lwip/def.h>
 #include <lwip/dhcp.h>
+#include <lwip/icmp.h>
+#include <lwip/ip.h>
 #include <lwip/ip4_addr.h>
 #include <lwip/netif.h>
 #include <lwip/pbuf.h>
@@ -54,6 +56,7 @@ extern "C" void __real_dhcp_parse_extra_opts(struct dhcp *dhcp, uint8_t state,
                                              struct pbuf *p, uint16_t offset);
 extern "C" struct netif *__real_ip4_route_src_hook(const ip4_addr_t *src,
                                                    const ip4_addr_t *dest);
+extern "C" void __real_icmp_input(struct pbuf *p, struct netif *inp);
 
 namespace DhcpRoutes {
 namespace {
@@ -63,9 +66,9 @@ constexpr uint8_t OPTION_CLASSLESS_ROUTES    = 121;  // RFC 3442
 constexpr uint8_t OPTION_MS_CLASSLESS_ROUTES = 249;  // Microsoft alias
 
 struct Entry {
-    uint32_t dest;     // network byte order
+    uint32_t dest;     // host byte order (RFC 3442 octets)
     uint8_t  prefix;   // significant bits
-    uint32_t gateway;  // network byte order
+    uint32_t gateway;  // host byte order
 };
 
 portMUX_TYPE s_mux = portMUX_INITIALIZER_UNLOCKED;
@@ -79,11 +82,7 @@ bool     s_has_default  = false;
 uint32_t s_base_gw      = 0;
 bool     s_base_gw_ok   = false;
 
-// Set when a 121/249 option was seen during the current lease. If the
-// following GOT_IP event finds it clear, the new lease has no routes
-// and stale entries from the previous network must go away.
-
-
+// value is in host byte order: the first octet is in bits 31..24.
 void formatIp(uint32_t value, char *out, size_t out_len) {
     snprintf(out, out_len, "%u.%u.%u.%u",
              (unsigned)((value >> 24) & 0xFFu), (unsigned)((value >> 16) & 0xFFu),
@@ -95,6 +94,15 @@ void formatIp(uint32_t value, char *out, size_t out_len) {
 // order, so convert explicitly at every lwIP boundary.
 uint32_t rawToHost(uint32_t raw) { return lwip_ntohl(raw); }
 uint32_t hostToRaw(uint32_t host) { return lwip_htonl(host); }
+
+// lwIP keeps the DHCP lease (including option 3) in netif client data.
+// Reading it is immune to the per-packet netif->gw rewrite below.
+uint32_t dhcpGatewayHost(struct netif *nif) {
+    if (nif == nullptr) return 0;
+    struct dhcp *dhcp = netif_dhcp_data(nif);
+    if (dhcp == nullptr) return 0;
+    return rawToHost(ip4_addr_get_u32(&dhcp->offered_gw_addr));
+}
 
 bool routeMatches(const Entry &route, uint32_t dest) {
     const uint32_t mask = route.prefix == 0
@@ -283,6 +291,8 @@ void appendRequest(struct dhcp_msg *msg, uint16_t *options_out_len) {
     requestOption121(msg, options_out_len);
 }
 
+// Called before an off-link transmit. lwIP has one gateway per netif,
+// so install the selected next hop before etharp_output() runs.
 void applyGateway(struct netif *nif, const ip4_addr_t *dest) {
     if (nif == nullptr || dest == nullptr) return;
 
@@ -301,7 +311,10 @@ void applyGateway(struct netif *nif, const ip4_addr_t *dest) {
         }
 
         if (!s_base_gw_ok) {
-            const uint32_t current = rawToHost(ip4_addr_get_u32(netif_ip4_gw(nif)));
+            uint32_t current = dhcpGatewayHost(nif);
+            if (current == 0) {
+                current = rawToHost(ip4_addr_get_u32(netif_ip4_gw(nif)));
+            }
             if (current != 0) {
                 s_base_gw    = current;
                 s_base_gw_ok = true;
@@ -325,6 +338,17 @@ void applyGateway(struct netif *nif, const ip4_addr_t *dest) {
         ip4_addr_t gw_addr;
         ip4_addr_set_u32(&gw_addr, hostToRaw(gateway));
         netif_set_gw(nif, &gw_addr);
+    }
+}
+
+// ICMP echo replies are emitted with the input netif and therefore
+// bypass ip4_route_src_hook. Pre-set the reply gateway from the request
+// source address (which becomes the reply destination).
+void prepareIcmpReply(struct netif *nif) {
+    if (nif == nullptr) return;
+    const ip_addr_t *src = ip_current_src_addr();
+    if (src != nullptr && IP_IS_V4(src)) {
+        applyGateway(nif, ip_2_ip4(src));
     }
 }
 
@@ -362,16 +386,14 @@ void reset() {
 }
 
 void onGotIp(uint32_t gateway) {
-    portENTER_CRITICAL(&s_mux);
-    uint32_t host_gateway = rawToHost(gateway);
+    // Prefer the lease's option-3 value: netif->gw is rewritten per
+    // packet by applyGateway(), so it is not a reliable source here.
+    uint32_t host_gateway = dhcpGatewayHost(netif_default);
     if (host_gateway == 0) {
-        // Some Arduino/IDF event paths leave the event gw zero. DHCP has
-        // already bound the lease here, so read the live netif gateway.
-        struct netif *nif = netif_default;
-        if (nif != nullptr) {
-            host_gateway = rawToHost(ip4_addr_get_u32(netif_ip4_gw(nif)));
-        }
+        host_gateway = rawToHost(gateway);
     }
+
+    portENTER_CRITICAL(&s_mux);
     s_base_gw    = host_gateway;
     s_base_gw_ok = host_gateway != 0;
     portEXIT_CRITICAL(&s_mux);
@@ -460,6 +482,11 @@ extern "C" struct netif *__wrap_ip4_route_src_hook(const ip4_addr_t *src,
 
     DhcpRoutes::applyGateway(nif, dest);
     return nif;
+}
+
+extern "C" void __wrap_icmp_input(struct pbuf *p, struct netif *inp) {
+    DhcpRoutes::prepareIcmpReply(inp);
+    __real_icmp_input(p, inp);
 }
 
 #endif // ARDUINO_ARCH_ESP32

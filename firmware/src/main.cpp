@@ -2034,10 +2034,12 @@ void loop() {
 #ifdef ARDUINO_ARCH_ESP32
     const uint32_t invalidSTA = WifiManager::consumeSTAInvalidation();
     if (invalidSTA) {
-        // DhcpRoutes::reset() is event-driven (disconnect/lost-IP). Doing it
-        // here can race with a reconnect: an old invalidation consumed after
-        // the new GOT_IP would erase the fresh route table.
-        TCPServer::invalidateInterface(IPAddress(invalidSTA));
+        // DhcpRoutes reset is event-driven (avoids a reconnect race). Only a
+        // real address change invalidates the TCP client: ip_changed also
+        // fires when the route hook changes netif->gw.
+        if (invalidSTA != static_cast<uint32_t>(WiFi.localIP())) {
+            TCPServer::invalidateInterface(IPAddress(invalidSTA));
+        }
     }
 #endif
     if (tcpStarted) TCPServer::loop();

@@ -31,15 +31,15 @@ struct Route {
     IPAddress gateway;
 };
 
-// Reset state and announce support on the serial console.
+// Reset state, register the event handler, announce support.
 void begin();
 
 // Drop all learned routes and the cached DHCP router address.
 void reset();
 
 // Called from the Wi-Fi event handler on ARDUINO_EVENT_WIFI_STA_GOT_IP.
-// gateway is in network byte order (esp_ip4_addr_t.addr). If the event
-// carries zero, the module falls back to the live netif gateway.
+// gateway is in network byte order (esp_ip4_addr_t.addr). The module
+// prefers the lease's option-3 value and uses this argument as fallback.
 void onGotIp(uint32_t gateway);
 
 size_t count();
@@ -50,7 +50,7 @@ IPAddress defaultGateway();
 bool      active();
 
 // The gateway supplied by DHCP option 3, kept separately because the
-// per-destination route hook temporarily rewrites netif->gw.
+// route hook rewrites netif->gw before each off-link transmit.
 IPAddress baseGateway();
 bool      baseGatewayValid();
 
