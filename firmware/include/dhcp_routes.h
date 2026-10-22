@@ -9,12 +9,13 @@
 //
 // This module:
 //   * adds option 121 to the DHCP Parameter Request List,
-//   * parses option 121 (and the Microsoft 249 alias) from OFFER/ACK,
+//   * stages option 121 (or the Microsoft 249 alias) from DHCP replies,
 //   * selects the learned next hop for matching IPv4 destinations.
 //
-// The route table is runtime-only: a valid option 121 replaces it,
-// malformed/duplicate options keep the last good table, and link loss
-// clears it.
+// Routes are staged per DHCP message and published only when the SDK binds
+// an accepted lease. Each interface owns its table; link/down/remove events
+// retire its active and pending state. A renewed ACK omitting classless routes
+// removes the old table. Malformed options never borrow previous-lease data.
 // =============================================================
 #pragma once
 
@@ -31,17 +32,13 @@ struct Route {
     IPAddress gateway;
 };
 
-// Reset state, register the event handler, announce support.
+// Announce support. Lifecycle callbacks register on the initialized lwIP core
+// when the DHCP client registers its UDP receive callback. Safe to call before
+// networking starts; repeated calls do not erase an already accepted lease.
 void begin();
 
-// Drop all learned routes and the cached DHCP router address.
-void reset();
-
-// Called from the Wi-Fi event handler on ARDUINO_EVENT_WIFI_STA_GOT_IP.
-// gateway is in network byte order (esp_ip4_addr_t.addr). The module
-// prefers the lease's option-3 value and uses this argument as fallback.
-void onGotIp(uint32_t gateway);
-
+// Management accessors describe the current default interface. Each call is
+// synchronized; several calls are not one atomic lease-generation snapshot.
 size_t count();
 bool   get(size_t index, Route& out);
 

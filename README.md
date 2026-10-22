@@ -241,14 +241,43 @@ The ESP32/ESP-IDF lwIP client does not request or parse DHCP option 121
 through a different next hop than the default router, replies from the
 modem leave through the default gateway and router connection tracking
 drops them (asymmetric routing). `firmware/include/dhcp_routes.h` adds
-option 121 to the Parameter Request List, parses option 121 (and the
-Microsoft 249 alias) from the DHCP OFFER/ACK, and installs the learned
-next hop for matching destinations. A valid option replaces the runtime
-table; malformed or duplicate options keep the last good table, and
-link loss clears it. Learned entries are listed on `/stats`, in
-`/api/network` (`base_gateway`, `dhcp_routes_active`, `dhcp_routes`),
-and in the serial log (`[DHCP] option 121: ...`). The LAN-only source
+option 121 to the Parameter Request List and stages option 121 (or the
+Microsoft 249 alias when 121 is absent) while the SDK parses a DHCP reply.
+Routes are published only when the original DHCP client binds an accepted
+lease, including unchanged renewals and delayed address-conflict checking.
+OFFERs and rejected messages never change the active table. A newly accepted
+ACK without classless routes removes the previous lease's table. Malformed
+or oversized route options install no classless table for that new lease;
+they never preserve another lease's routes.
+
+Tables belong to their actual Wi-Fi/Ethernet interface. Link/admin down,
+address loss and interface removal retire that interface's active and pending
+state without erasing another interface's lease. Up to four interface owners
+are tracked, each retaining eight nondefault routes and a separate classless
+default route. Repeated
+121/249 options are concatenated (up to 512 bytes per option code); 121 takes
+precedence. Prefixes are normalized and unsupported zero-router/on-link entries
+are ignored. When 121 is authoritative, option 3 is ignored even if no `/0`
+route was provided. Learned entries are listed on `/stats` and `/api/network`
+(`base_gateway`, `dhcp_routes_active`, `dhcp_routes`). The LAN-only source
 filter above is unchanged and still applies.
+
+The existing per-packet lwIP gateway technique remains: the selected next hop
+is retained until another routed send or lease transition. ICMP echo replies
+are covered explicitly; other explicit-netif output paths can still use the
+last selected gateway. This change does not claim a general-purpose routing
+stack or physical routed-LAN validation.
+
+Host regressions (g++ with AddressSanitizer/UndefinedBehaviorSanitizer):
+
+```bash
+python3 firmware/tools/test_dhcp_routes.py
+python3 firmware/tools/test_wifi_recovery.py
+```
+
+These execute production routing/lifecycle, Wi-Fi/TCP and main-loop consumer
+code at recording SDK boundaries. SDK packet acceptance and network callbacks
+are fixtures, not a running full network stack or a physical DHCP/VPN test.
 
 T114 has no IP stack at all — the only paths in are USB-CDC and the
 secondary UART, and updates are either Adafruit DFU over USB or the

@@ -1782,9 +1782,11 @@ void setup() {
     // and skip Wi-Fi; if no link we tear EMAC back down (so the RMII
     // GPIOs are released) and fall back to Wi-Fi. Boards without
     // Ethernet (`ethernet.enabled = false`) skip straight to Wi-Fi.
-    // Initialize the DHCP option 121 module (event handler + route state)
-    // before either interface starts DHCP so the first lease is covered.
+    // Initialize the DHCP option 121 module before either interface starts.
+    // Its lifecycle hooks register on the lwIP core at DHCP PCB creation.
+#ifdef ARDUINO_ARCH_ESP32
     DhcpRoutes::begin();
+#endif
     WifiManager::loadConfigOnly();
     const auto& netCfg = WifiManager::getConfig();
     bool useEthernet = false;
@@ -2034,12 +2036,9 @@ void loop() {
 #ifdef ARDUINO_ARCH_ESP32
     const uint32_t invalidSTA = WifiManager::consumeSTAInvalidation();
     if (invalidSTA) {
-        // DhcpRoutes reset is event-driven (avoids a reconnect race). Only a
-        // real address change invalidates the TCP client: ip_changed also
-        // fires when the route hook changes netif->gw.
-        if (invalidSTA != static_cast<uint32_t>(WiFi.localIP())) {
-            TCPServer::invalidateInterface(IPAddress(invalidSTA));
-        }
+        // A real outage remains invalid even after same-address recovery.
+        // WifiManager excludes gateway-only DHCP changes at the producer.
+        TCPServer::invalidateInterface(IPAddress(invalidSTA));
     }
 #endif
     if (tcpStarted) TCPServer::loop();

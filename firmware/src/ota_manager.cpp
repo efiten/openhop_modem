@@ -132,10 +132,12 @@ struct NetworkSnapshot {
     IPAddress dns2;
 };
 
-// lwIP has one gateway per netif, and the option-121 route hook rewrites
-// it per off-link packet. Display the cached DHCP option-3 gateway so the
-// WebUI/API does not jump between the default router and a route next hop.
+// Per-packet gateway changes are not the effective default route. Option121
+// supersedes option3, including an authoritative absence of a default route.
 static IPAddress displayGateway(const IPAddress& live) {
+    if (DhcpRoutes::active()) {
+        return DhcpRoutes::hasDefaultRoute() ? DhcpRoutes::defaultGateway() : IPAddress(uint32_t(0));
+    }
     return DhcpRoutes::baseGatewayValid() ? DhcpRoutes::baseGateway() : live;
 }
 

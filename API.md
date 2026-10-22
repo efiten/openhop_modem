@@ -124,14 +124,24 @@ Example:
 }
 ```
 
-`gateway` is the default gateway shown by the WebUI: for DHCP it is the
-cached option-3 router, for static addressing it is the configured
-gateway. `base_gateway` exposes the cached DHCP option-3 router
-separately because lwIP has one gateway per interface while option 121
-can install several per-prefix next hops. It is `null` until a DHCP
-lease supplies it (and therefore also in static-address mode).
-`dhcp_routes_active` reports whether a valid option 121 table is
-installed, and `dhcp_routes` lists the entries as
+`gateway` is the effective default gateway shown by the WebUI. With valid
+classless routes it is the advertised `/0` router, or `null` when no classless
+default exists (option 3 is ignored). Without classless routes it is the DHCP
+option-3 router, or the configured gateway in static mode. `base_gateway`
+exposes the cached option-3 router as diagnostic lease data; it is not a
+fallback when option 121 is authoritative. It is `null` before an accepted
+DHCP lease and in static-address mode.
+
+`dhcp_routes_active` reports whether valid classless routing is installed for
+the current default interface. Option 121 takes precedence over 249; repeated
+options concatenate up to 512 bytes per code. Up to eight nondefault routes
+plus one default are retained. New accepted leases replace the entire table,
+including removal when their ACK omits classless routes. Rejected packets and
+OFFERs never publish routes. Malformed/oversized route options on an accepted
+lease install no classless table rather than retaining previous-lease routes.
+Link/address/admin loss and removal retire only the affected interface.
+
+`dhcp_routes` lists the entries as
 `{destination, prefix, gateway}` objects. A DHCP-advertised default
 route is included as
 `destination: "0.0.0.0"`, `prefix: 0`. The array is empty on static
