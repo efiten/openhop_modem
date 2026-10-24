@@ -39,6 +39,8 @@ struct NetworkModel {
     std::string linkState;
     std::string mac;
     std::string tcpStatus;
+    // Learned RFC 3442 routes, pre-formatted as "destination/prefix via next-hop".
+    std::vector<std::string> dhcpRoutes;
 };
 
 struct ConfigModel {
