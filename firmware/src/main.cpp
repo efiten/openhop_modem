@@ -54,6 +54,11 @@
 #  include "runtime_stats.h"
 #  include "gps_manager.h"
 #  include "pmu_manager.h"
+#  if ARDUINO_USB_MODE && ARDUINO_USB_CDC_ON_BOOT && SOC_USB_SERIAL_JTAG_SUPPORTED
+#    include "hal/usb_serial_jtag_ll.h"
+#    include "usb_tx_stall_watch.h"
+#    define OPENHOP_HWCDC_TX_KICK 1
+#  endif
 #else
 // nRF52 builds exclude the ESP32 Wi-Fi/OTA/display managers via
 // platformio.ini's build_src_filter. Most nRF52 targets are
@@ -724,6 +729,23 @@ static void writeFrame(uint8_t cmd, const uint8_t* payload, uint16_t len,
     if (toUart && uartEnabled) {
         PROTO_UART.write(buf, i);
     }
+}
+
+// HWCDC (arduino-esp32 3.3.x) can leave written bytes in its TX ring buffer
+// with nothing telling the USB Serial/JTAG FIFO to send them, so a reply sits
+// on the modem until the next Serial write. Re-arming the IN_EMPTY interrupt
+// alone does not release it; a FIFO flush does, as HWCDC::write() and
+// HWCDC::flush() do. Kick the FIFO when bytes have been waiting too long.
+#if defined(OPENHOP_HWCDC_TX_KICK)
+static UsbTxStallWatch usbTxStallWatch(20);
+#endif
+
+static void kickStalledUsbSerialTx() {
+#if defined(OPENHOP_HWCDC_TX_KICK)
+    if (!usbTxStallWatch.update(Serial.availableForWrite(), millis())) return;
+    usb_serial_jtag_ll_txfifo_flush();
+    usb_serial_jtag_ll_ena_intr_mask(USB_SERIAL_JTAG_INTR_SERIAL_IN_EMPTY);
+#endif
 }
 
 void sendFrame(uint8_t cmd, const uint8_t* payload, uint16_t len, TransportSource dest) {
@@ -1597,6 +1619,10 @@ void setup() {
 #endif
 
     Serial.begin(921600);
+#if defined(OPENHOP_HWCDC_TX_KICK)
+    // Nothing has been written yet, so this is the empty TX buffer size.
+    usbTxStallWatch.prime(Serial.availableForWrite());
+#endif
     // On boards with native USB-CDC (Ikoka, LilyGO T3-S3) the first
     // Serial output races against the host opening the CDC endpoint —
     // anything printed before the host attaches is silently dropped.
@@ -2011,6 +2037,7 @@ void loop() {
         handleLoRaRx();
     }
 
+    kickStalledUsbSerialTx();
     while (Serial.available()) {
         uint8_t b = (uint8_t)Serial.read();
         frameparser_feed(serialParser, b, TransportSource::USB,
